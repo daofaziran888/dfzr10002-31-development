@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 
-import { request } from '@/api/client'
+import { request, readErrorDetail } from '@/api/client'
 
 const ENDPOINT = '/api/log'
 const columns = [
@@ -22,37 +23,38 @@ const statuses = [
   "已复核",
   "已归档"
 ]
-const stats = [
-  {
-    "label": "操作日志总数",
-    "value": 0
-  },
-  {
-    "label": "已复核记录",
-    "value": 0
-  },
-  {
-    "label": "已归档记录",
-    "value": 0
-  }
-]
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | null> & {
+  采集标记?: { status: string; reason: string; from: string; to: string }
+  访问说明?: string
+  脱敏字段?: string[]
+}
+
+// 列表筛选项与后端查询参数一一对应，避免把中文列名当成参数名发出去。
+const FILTER_FIELDS = [
+  { key: 'keyword', label: '日志编号' },
+  { key: 'object_code', label: '操作对象' },
+  { key: 'operator', label: '操作人' },
+  { key: 'action_type', label: '操作类型' },
+]
 
 export default function LogView() {
   const [rows, setRows] = useState<Row[]>([])
   const [total, setTotal] = useState(0)
   const [errorMessage, setErrorMessage] = useState('')
   const [filters, setFilters] = useState<Record<string, string>>({})
-  const filterFields = useMemo(() => columns.slice(0, 3), [])
 
   const reload = useCallback(async () => {
     setErrorMessage('')
-    const query = new URLSearchParams(filters).toString()
+    const query = new URLSearchParams()
+    for (const field of FILTER_FIELDS) {
+      const value = (filters[field.key] ?? '').trim()
+      if (value) query.set(field.key, value)
+    }
     try {
       const response = await request(`${ENDPOINT}?${query}`)
       if (!response.ok) {
-        throw new Error('操作日志列表读取失败')
+        throw new Error(await readErrorDetail(response, '操作日志列表读取失败'))
       }
       const payload = await response.json()
       setRows(payload.items ?? [])
@@ -74,13 +76,22 @@ export default function LogView() {
         body: JSON.stringify({ action }),
       })
       if (!response.ok) {
-        throw new Error('分析操作日志动作未生效，请稍后重试')
+        // 权限不足等拒绝原因原样展示；拒绝路径不会改动日志记录。
+        throw new Error(await readErrorDetail(response, '分析操作日志动作未生效'))
+      }
+      const payload = await response.json()
+      if (payload.ok === false) {
+        throw new Error(payload.message || '分析操作日志动作未生效')
       }
       await reload()
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '分析操作日志操作失败')
     }
   }
+
+  const totalCount = rows.length
+  const reviewedCount = rows.filter((row) => row.status === '已复核').length
+  const archivedCount = rows.filter((row) => row.status === '已归档').length
 
   return (
     <section className="page" data-module="log">
@@ -93,6 +104,7 @@ export default function LogView() {
           <button className="btn primary" type="button" onClick={() => setErrorMessage('操作日志登记入口尚未接入审批流')}>
             登记操作日志
           </button>
+          <Link className="btn" to="/log/audit">进入审计工作区</Link>
           <button className="btn" type="button" onClick={() => window.open(`${ENDPOINT}/export`, '_blank')}>
             导出分析操作日志清单
           </button>
@@ -100,7 +112,11 @@ export default function LogView() {
       </header>
 
       <div className="stat-row">
-        {stats.map((item) => (
+        {[
+          { label: '操作日志总数', value: totalCount },
+          { label: '已复核记录', value: reviewedCount },
+          { label: '已归档记录', value: archivedCount },
+        ].map((item) => (
           <article key={item.label} className="stat-card">
             <span className="stat-label">{item.label}</span>
             <strong className="stat-value">{item.value}</strong>
@@ -109,13 +125,13 @@ export default function LogView() {
       </div>
 
       <form className="filter-bar" onSubmit={(event) => { event.preventDefault(); void reload() }}>
-        {filterFields.map((field) => (
-          <label key={field} className="filter-item">
-            <span>{field}</span>
+        {FILTER_FIELDS.map((field) => (
+          <label key={field.key} className="filter-item">
+            <span>{field.label}</span>
             <input
-              value={filters[field] ?? ''}
-              placeholder={`按${field}检索`}
-              onChange={(event) => setFilters((prev) => ({ ...prev, [field]: event.target.value }))}
+              value={filters[field.key] ?? ''}
+              placeholder={`按${field.label}检索`}
+              onChange={(event) => setFilters((prev) => ({ ...prev, [field.key]: event.target.value }))}
             />
           </label>
         ))}
@@ -132,8 +148,23 @@ export default function LogView() {
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={String(row.id)}>
-              {columns.map((column) => <td key={column}>{row[column] ?? '—'}</td>)}
+            <tr key={String(row.id)} className={row.采集标记 ? 'row-warn' : ''}>
+              {columns.map((column) => (
+                <td key={column}>
+                  {row[column] ?? '—'}
+                  {column === '操作对象' && (
+                    <div className="masked-hint">
+                      <Link to={`/log/audit?object=${encodeURIComponent(String(row['操作对象'] ?? ''))}`}>串联审计链路</Link>
+                    </div>
+                  )}
+                  {column === '操作类型' && row.采集标记 && (
+                    <div><span className="badge badge-warn">{row.采集标记.status}</span></div>
+                  )}
+                  {column === '日志备注' && Array.isArray(row.脱敏字段) && row.脱敏字段.length > 0 && (
+                    <div className="masked-hint">已脱敏：{row.脱敏字段.join('、')}</div>
+                  )}
+                </td>
+              ))}
               <td className="row-actions">
                 {actions.map((action) => (
                   <button key={action} className="link" type="button" onClick={() => void runAction(action, row)}>

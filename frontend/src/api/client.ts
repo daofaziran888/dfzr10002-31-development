@@ -12,10 +12,24 @@ export function request(path: string, init?: RequestInit): Promise<Response> {
   })
 }
 
-export async function fetchJson<T>(path: string): Promise<T> {
-  const response = await request(path)
+export async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await request(path, init)
   if (!response.ok) {
     throw new Error(`接口返回 ${response.status}，数据未更新`)
   }
   return (await response.json()) as T
+}
+
+/** 解析后端错误体里的 detail，把 403/400 的原因原样展示，而不是笼统的失败。 */
+export async function readErrorDetail(response: Response, fallback: string): Promise<string> {
+  try {
+    const payload = await response.json()
+    const detail = (payload as { detail?: unknown }).detail
+    if (typeof detail === 'string' && detail.trim()) {
+      return detail
+    }
+  } catch {
+    // 错误体不是 JSON 时退回兜底文案
+  }
+  return `${fallback}（接口返回 ${response.status}）`
 }
